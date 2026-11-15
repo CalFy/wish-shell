@@ -1,11 +1,13 @@
 // wish — простий командний інтерпретатор (OSTEP, processes-shell)
-// Етап 2: розбиття рядка на слова, вбудовані команди exit, cd, path.
+// Етап 3: запуск зовнішніх програм (fork + execv + waitpid) з пошуком у path.
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // Список каталогів, у яких шукаємо програми. Початково — лише /bin.
@@ -66,12 +68,52 @@ bool run_builtin(const std::vector<std::string>& args) {
     return false;
 }
 
+// Шукає виконуваний файл у каталогах search_path.
+// Повертає повний шлях або порожній рядок, якщо не знайдено.
+std::string find_program(const std::string& name) {
+    for (const std::string& dir : search_path) {
+        std::string full = dir + "/" + name;
+        if (access(full.c_str(), X_OK) == 0) return full;
+    }
+    return "";
+}
+
+// Запускає зовнішню програму в дочірньому процесі.
+// Повертає pid дитини або -1 у разі помилки.
+pid_t launch(const std::vector<std::string>& args) {
+    std::string prog = find_program(args[0]);
+    if (prog.empty()) {
+        print_error();
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        print_error();
+        return -1;
+    }
+    if (pid == 0) {
+        // Дочірній процес: готуємо argv у форматі, який чекає execv()
+        std::vector<char*> argv;
+        for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+        argv.push_back(nullptr);
+
+        execv(prog.c_str(), argv.data());
+        // сюди потрапляємо лише якщо execv() не вдався
+        print_error();
+        _exit(1);
+    }
+    return pid;  // батьківський процес
+}
+
 // Обробка одного рядка вводу.
 void process_line(const std::string& line) {
     std::vector<std::string> args = split_words(line);
     if (args.empty()) return;  // порожній рядок — нічого не робимо
     if (run_builtin(args)) return;
-    // зовнішні програми — на наступному етапі
+
+    pid_t pid = launch(args);
+    if (pid > 0) waitpid(pid, nullptr, 0);  // чекаємо завершення дитини
 }
 
 int main(int argc, char* argv[]) {
