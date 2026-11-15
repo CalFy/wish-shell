@@ -1,17 +1,24 @@
 // wish — простий командний інтерпретатор (OSTEP, processes-shell)
-// Етап 3: запуск зовнішніх програм (fork + execv + waitpid) з пошуком у path.
+// Етап 4: перенаправлення виводу (cmd args > file).
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 // Список каталогів, у яких шукаємо програми. Початково — лише /bin.
 std::vector<std::string> search_path = {"/bin"};
+
+// Одна розібрана команда.
+struct Command {
+    std::vector<std::string> args;  // ім'я програми та аргументи
+    std::string out_file;           // файл для '>' (порожній — без перенаправлення)
+};
 
 // Єдине повідомлення про помилку, яке вимагає завдання.
 // Пишемо через write(), щоб не залежати від буферизації stdio.
@@ -43,6 +50,28 @@ std::vector<std::string> split_words(const std::string& s) {
     }
     if (!cur.empty()) words.push_back(cur);
     return words;
+}
+
+// Розбирає текст однієї команди з можливим перенаправленням.
+// Повертає false, якщо синтаксис неправильний:
+//   - більше одного '>'
+//   - немає команди перед '>'
+//   - після '>' не рівно один файл
+bool parse_command(const std::string& text, Command& cmd) {
+    size_t pos = text.find('>');
+    if (pos == std::string::npos) {
+        cmd.args = split_words(text);
+        return true;
+    }
+    if (text.find('>', pos + 1) != std::string::npos) return false;
+
+    // '>' може стояти без пробілів навколо: "ls>out" — тому ріжемо рядок
+    cmd.args = split_words(text.substr(0, pos));
+    std::vector<std::string> files = split_words(text.substr(pos + 1));
+    if (cmd.args.empty() || files.size() != 1) return false;
+
+    cmd.out_file = files[0];
+    return true;
 }
 
 // Виконує вбудовану команду. Повертає true, якщо команда була вбудованою.
@@ -80,7 +109,8 @@ std::string find_program(const std::string& name) {
 
 // Запускає зовнішню програму в дочірньому процесі.
 // Повертає pid дитини або -1 у разі помилки.
-pid_t launch(const std::vector<std::string>& args) {
+pid_t launch(const Command& cmd) {
+    const std::vector<std::string>& args = cmd.args;
     std::string prog = find_program(args[0]);
     if (prog.empty()) {
         print_error();
@@ -93,7 +123,20 @@ pid_t launch(const std::vector<std::string>& args) {
         return -1;
     }
     if (pid == 0) {
-        // Дочірній процес: готуємо argv у форматі, який чекає execv()
+        // Дочірній процес. Якщо є '>', підміняємо stdout і stderr файлом
+        // (файл створюється або перезаписується).
+        if (!cmd.out_file.empty()) {
+            int fd = open(cmd.out_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                print_error();
+                _exit(1);
+            }
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+        }
+
+        // Готуємо argv у форматі, який чекає execv()
         std::vector<char*> argv;
         for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
         argv.push_back(nullptr);
@@ -108,11 +151,15 @@ pid_t launch(const std::vector<std::string>& args) {
 
 // Обробка одного рядка вводу.
 void process_line(const std::string& line) {
-    std::vector<std::string> args = split_words(line);
-    if (args.empty()) return;  // порожній рядок — нічого не робимо
-    if (run_builtin(args)) return;
+    Command cmd;
+    if (!parse_command(line, cmd)) {
+        print_error();
+        return;
+    }
+    if (cmd.args.empty()) return;  // порожній рядок — нічого не робимо
+    if (run_builtin(cmd.args)) return;
 
-    pid_t pid = launch(args);
+    pid_t pid = launch(cmd);
     if (pid > 0) waitpid(pid, nullptr, 0);  // чекаємо завершення дитини
 }
 
