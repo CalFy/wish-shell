@@ -1,5 +1,11 @@
 // wish — простий командний інтерпретатор (OSTEP, processes-shell)
-// Етап 4: перенаправлення виводу (cmd args > file).
+//
+// Можливості:
+//   - інтерактивний режим (запрошення "wish> ") та пакетний (./wish file)
+//   - вбудовані команди: exit, cd, path
+//   - запуск програм з каталогів path через fork/execv/waitpid
+//   - перенаправлення виводу: cmd args > file
+//   - паралельні команди: cmd1 & cmd2 args & cmd3
 
 #include <cstdio>
 #include <cstdlib>
@@ -150,17 +156,34 @@ pid_t launch(const Command& cmd) {
 }
 
 // Обробка одного рядка вводу.
+// Рядок ділимо за '&' на окремі команди. Усі зовнішні команди запускаємо
+// одразу (не чекаючи одна одну), а потім чекаємо завершення всіх дітей.
 void process_line(const std::string& line) {
-    Command cmd;
-    if (!parse_command(line, cmd)) {
-        print_error();
-        return;
-    }
-    if (cmd.args.empty()) return;  // порожній рядок — нічого не робимо
-    if (run_builtin(cmd.args)) return;
+    std::vector<pid_t> children;
 
-    pid_t pid = launch(cmd);
-    if (pid > 0) waitpid(pid, nullptr, 0);  // чекаємо завершення дитини
+    size_t start = 0;
+    while (true) {
+        size_t amp = line.find('&', start);
+        std::string part = (amp == std::string::npos)
+                               ? line.substr(start)
+                               : line.substr(start, amp - start);
+
+        Command cmd;
+        if (!parse_command(part, cmd)) {
+            print_error();
+        } else if (!cmd.args.empty()) {  // порожня частина ("&" в кінці) — пропускаємо
+            if (!run_builtin(cmd.args)) {
+                pid_t pid = launch(cmd);
+                if (pid > 0) children.push_back(pid);
+            }
+        }
+
+        if (amp == std::string::npos) break;
+        start = amp + 1;
+    }
+
+    // Чекаємо, поки завершаться всі запущені паралельно процеси
+    for (pid_t pid : children) waitpid(pid, nullptr, 0);
 }
 
 int main(int argc, char* argv[]) {
